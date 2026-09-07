@@ -134,16 +134,15 @@ pub fn is_within_active_hours(start: &str, end: &str, timezone: &str) -> bool {
         Some(t) => t,
         None => return true, // invalid config → always active
     };
-    let end_time = match parse_hhmm(end) {
-        Some(t) => t,
-        None => return true,
-    };
-
-    // "24:00" means end-of-day.
+    // "24:00" means end-of-day. chrono's `%H` rejects hour 24, so this must
+    // run before parsing `end`.
     let end_minutes = if end == "24:00" {
         24 * 60
     } else {
-        end_time.hour() * 60 + end_time.minute()
+        match parse_hhmm(end) {
+            Some(t) => t.hour() * 60 + t.minute(),
+            None => return true,
+        }
     };
     let start_minutes = start_time.hour() * 60 + start_time.minute();
 
@@ -273,6 +272,17 @@ fn current_minutes(timezone: &str) -> u32 {
 mod tests {
     use super::*;
 
+    /// Fixed-offset zones, no DST, spaced so that at any instant exactly 4 of
+    /// the 6 local times fall inside an 08:00–24:00 window and 2 outside.
+    const TIMEZONES: [&str; 6] = [
+        "Etc/GMT+12",
+        "Etc/GMT+8",
+        "Etc/GMT+4",
+        "UTC",
+        "Etc/GMT-4",
+        "Etc/GMT-8",
+    ];
+
     // ── strip_heartbeat_token ────────────────────────────────────────────
 
     #[test]
@@ -356,6 +366,34 @@ mod tests {
     #[test]
     fn invalid_time_always_active() {
         assert!(is_within_active_hours("invalid", "24:00", "local"));
+    }
+
+    #[test]
+    fn end_2400_suppresses_before_start_of_default_window() {
+        // Default config. `start` has a value that parses, so only `end`
+        // decides the parse here; an overnight local time must be outside.
+        let outside: Vec<&str> = TIMEZONES
+            .iter()
+            .copied()
+            .filter(|tz| !is_within_active_hours("08:00", "24:00", tz))
+            .collect();
+        assert_eq!(
+            outside.len(),
+            2,
+            "expected 4 of 6 zones inside an 08:00–24:00 window and 2 outside, got outside: {outside:?}"
+        );
+    }
+
+    #[test]
+    fn full_day_window_2400_end_is_always_active() {
+        assert!(is_within_active_hours("00:00", "24:00", "Etc/GMT+12"));
+        assert!(is_within_active_hours("00:00", "24:00", "UTC"));
+        assert!(is_within_active_hours("00:00", "24:00", "Etc/GMT-8"));
+    }
+
+    #[test]
+    fn start_2400_is_invalid_and_stays_always_active() {
+        assert!(is_within_active_hours("24:00", "17:00", "UTC"));
     }
 
     #[test]
