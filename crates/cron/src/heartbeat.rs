@@ -1,6 +1,6 @@
 //! Heartbeat logic: token stripping, empty-content detection, active-hours check.
 
-use chrono::{Local, NaiveTime, Timelike, Utc};
+use chrono::{DateTime, Local, NaiveTime, Timelike, Utc};
 
 /// The sentinel token an LLM returns when nothing noteworthy is happening.
 pub const HEARTBEAT_OK: &str = "HEARTBEAT_OK";
@@ -130,6 +130,10 @@ pub fn is_heartbeat_content_empty(content: &str) -> bool {
 /// Handles overnight windows (e.g. start=22:00, end=06:00).
 /// If timezone is "local" or empty, uses the system local time.
 pub fn is_within_active_hours(start: &str, end: &str, timezone: &str) -> bool {
+    is_within_active_hours_at(start, end, timezone, &Utc::now())
+}
+
+fn is_within_active_hours_at(start: &str, end: &str, timezone: &str, now: &DateTime<Utc>) -> bool {
     let start_time = match parse_hhmm(start) {
         Some(t) => t,
         None => return true, // invalid config → always active
@@ -146,7 +150,7 @@ pub fn is_within_active_hours(start: &str, end: &str, timezone: &str) -> bool {
     };
     let start_minutes = start_time.hour() * 60 + start_time.minute();
 
-    let now_minutes = current_minutes(timezone);
+    let now_minutes = current_minutes_at(timezone, now);
 
     if start_minutes <= end_minutes {
         // Normal window: 08:00–24:00
@@ -254,23 +258,23 @@ fn parse_hhmm(s: &str) -> Option<NaiveTime> {
     NaiveTime::parse_from_str(s, "%H:%M").ok()
 }
 
-fn current_minutes(timezone: &str) -> u32 {
+fn current_minutes_at(timezone: &str, now: &DateTime<Utc>) -> u32 {
     if timezone.is_empty() || timezone == "local" {
-        let local = Local::now();
+        let local = now.with_timezone(&Local);
         local.hour() * 60 + local.minute()
     } else if let Ok(tz) = timezone.parse::<chrono_tz::Tz>() {
-        let dt = Utc::now().with_timezone(&tz);
+        let dt = now.with_timezone(&tz);
         dt.hour() * 60 + dt.minute()
     } else {
         // Fallback to local on invalid tz.
-        let local = Local::now();
+        let local = now.with_timezone(&Local);
         local.hour() * 60 + local.minute()
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use {super::*, chrono::TimeZone};
 
     /// Fixed-offset zones, no DST, spaced so that at any instant exactly 4 of
     /// the 6 local times fall inside an 08:00–24:00 window and 2 outside.
@@ -370,12 +374,11 @@ mod tests {
 
     #[test]
     fn end_2400_suppresses_before_start_of_default_window() {
-        // Default config. `start` has a value that parses, so only `end`
-        // decides the parse here; an overnight local time must be outside.
+        let now = Utc.with_ymd_and_hms(2026, 1, 1, 12, 0, 0).unwrap();
         let outside: Vec<&str> = TIMEZONES
             .iter()
             .copied()
-            .filter(|tz| !is_within_active_hours("08:00", "24:00", tz))
+            .filter(|tz| !is_within_active_hours_at("08:00", "24:00", tz, &now))
             .collect();
         assert_eq!(
             outside.len(),
